@@ -1,0 +1,8 @@
+venv_tf/
+venv_clasificador/
+dataset/
+dataset_listo/
+garbage-classification.zip
+__pycache__/
+*.pyc
+*.h5

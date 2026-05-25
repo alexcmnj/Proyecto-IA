@@ -1,5 +1,17 @@
+"""
+=============================================================
+  ENTRENAMIENTO CNN — CLASIFICADOR DE RESIDUOS
+  MobileNetV2 + Transfer Learning + TensorFlow
+  Dataset: Garbage Classification (Kaggle)
+=============================================================
+  Ejecutar: python entrenar_modelo.py
+  Resultado: modelo_residuos.h5 (listo para usar en la app)
+=============================================================
+"""
 
-import os, shutil, random
+import os
+import shutil
+import random
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.applications import MobileNetV2
@@ -9,62 +21,226 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 
-DATASET_RAW = "dataset/Garbage classification/Garbage classification"
+# ═══════════════════════════════════════════════════════════
+#  CONFIGURACIÓN
+# ═══════════════════════════════════════════════════════════
+
+# Ruta donde está el dataset descomprimido
+DATASET_RAW = "dataset/Garbage classification/Garbage classification/garbage_classification"
+# Carpeta organizada para entrenamiento
 DATASET_LISTO = "dataset_listo"
-MAPA = {"cardboard":"Carton","glass":"Vidrio","metal":"Metal","paper":"Papel","plastic":"Plastico"}
-CATS = ["Carton","Vidrio","Metal","Papel","Plastico"]
-IMG_SIZE = (224,224)
-BATCH = 32
+
+# Categorías del dataset → nombres en español para la app
+MAPA_CATEGORIAS = {
+    "cardboard":   "Cartón",
+    "brown-glass": "Vidrio",
+    "green-glass": "Vidrio",
+    "white-glass": "Vidrio",
+    "metal":       "Metal",
+    "paper":       "Papel",
+    "plastic":     "Plástico",
+}
+
+CATEGORIAS_ES = ["Cartón", "Vidrio", "Metal", "Papel", "Plástico"]
+
+IMG_SIZE    = (224, 224)
+BATCH_SIZE  = 32
+EPOCAS_F1   = 15   # Fase 1: solo cabeza
+EPOCAS_F2   = 10   # Fase 2: fine-tuning
+VAL_SPLIT   = 0.2  # 20% para validación
 MODELO_PATH = "modelo_residuos.h5"
-random.seed(42); np.random.seed(42); tf.random.set_seed(42)
+SEED        = 42
+
+random.seed(SEED)
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+
+
+# ═══════════════════════════════════════════════════════════
+#  PASO 1 — ORGANIZAR DATASET EN train/ y val/
+# ═══════════════════════════════════════════════════════════
 
 def organizar_dataset():
+    """
+    Reorganiza las imágenes en:
+        dataset_listo/
+            train/  Cartón/ Vidrio/ Metal/ Papel/ Plástico/
+            val/    Cartón/ Vidrio/ Metal/ Papel/ Plástico/
+    """
     if os.path.exists(DATASET_LISTO):
-        print("Dataset ya organizado."); return
-    print("Organizando dataset...")
-    for sp in ["train","val"]:
-        for c in CATS:
-            os.makedirs(os.path.join(DATASET_LISTO,sp,c),exist_ok=True)
-    for en,es in MAPA.items():
-        folder = os.path.join(DATASET_RAW,en)
-        if not os.path.exists(folder): print(f"No encontrada: {folder}"); continue
-        imgs = [f for f in os.listdir(folder) if f.lower().endswith((".jpg",".jpeg",".png"))]
-        random.shuffle(imgs)
-        val_set = set(imgs[:int(len(imgs)*0.2)])
-        for img in imgs:
-            sp = "val" if img in val_set else "train"
-            shutil.copy2(os.path.join(folder,img),os.path.join(DATASET_LISTO,sp,es,img))
-        print(f"  {es}: {len(imgs)-len(val_set)} train | {len(val_set)} val")
+        print(f"[OK] Dataset ya organizado en '{DATASET_LISTO}' — saltando este paso.")
+        return
 
-def construir_modelo():
-    base = MobileNetV2(input_shape=(*IMG_SIZE,3),include_top=False,weights="imagenet")
-    base.trainable = False
-    x = GlobalAveragePooling2D()(base.output)
-    x = Dense(256,activation="relu")(x); x = Dropout(0.4)(x)
-    x = Dense(128,activation="relu")(x); x = Dropout(0.3)(x)
-    out = Dense(len(CATS),activation="softmax")(x)
-    m = Model(inputs=base.input,outputs=out)
-    m.compile(optimizer=tf.keras.optimizers.Adam(1e-4),loss="categorical_crossentropy",metrics=["accuracy"])
-    return m
+    print("\n── Organizando dataset ──")
+    for split in ["train", "val"]:
+        for cat_es in CATEGORIAS_ES:
+            os.makedirs(os.path.join(DATASET_LISTO, split, cat_es), exist_ok=True)
+
+    for cat_en, cat_es in MAPA_CATEGORIAS.items():
+        carpeta = os.path.join(DATASET_RAW, cat_en)
+        if not os.path.exists(carpeta):
+            print(f"  ⚠️  Carpeta no encontrada: {carpeta}")
+            continue
+
+        imagenes = [f for f in os.listdir(carpeta)
+                    if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+        random.shuffle(imagenes)
+
+        n_val   = int(len(imagenes) * VAL_SPLIT)
+        val_set = set(imagenes[:n_val])
+
+        for img in imagenes:
+            split = "val" if img in val_set else "train"
+            src   = os.path.join(carpeta, img)
+            dst   = os.path.join(DATASET_LISTO, split, cat_es, img)
+            shutil.copy2(src, dst)
+
+        n_train = len(imagenes) - n_val
+        print(f"  {cat_es:10s}: {n_train} train  |  {n_val} val")
+
+    print(f"[OK] Dataset organizado en '{DATASET_LISTO}'\n")
+
+
+# ═══════════════════════════════════════════════════════════
+#  PASO 2 — CONSTRUIR MODELO CNN
+# ═══════════════════════════════════════════════════════════
+
+def construir_modelo(num_clases: int = 5) -> Model:
+    """
+    Arquitectura CNN:
+        Input (224×224×3)
+              ↓
+        MobileNetV2 (congelado, ImageNet)   ← extractor de características
+              ↓
+        GlobalAveragePooling2D
+              ↓
+        Dense(256, ReLU) → Dropout(0.4)
+              ↓
+        Dense(128, ReLU) → Dropout(0.3)
+              ↓
+        Dense(num_clases, Softmax)
+    """
+    base = MobileNetV2(
+        input_shape=(*IMG_SIZE, 3),
+        include_top=False,
+        weights="imagenet",
+    )
+    base.trainable = False  # Transfer Learning: base congelada
+
+    x      = base.output
+    x      = GlobalAveragePooling2D()(x)
+    x      = Dense(256, activation="relu")(x)
+    x      = Dropout(0.4)(x)
+    x      = Dense(128, activation="relu")(x)
+    x      = Dropout(0.3)(x)
+    salida = Dense(num_clases, activation="softmax")(x)
+
+    modelo = Model(inputs=base.input, outputs=salida)
+    modelo.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+        loss="categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+    return modelo
+
+
+# ═══════════════════════════════════════════════════════════
+#  PASO 3 — GENERADORES DE DATOS
+# ═══════════════════════════════════════════════════════════
+
+def crear_generadores():
+    aug = ImageDataGenerator(
+        preprocessing_function=preprocess_input,
+        rotation_range=25,
+        width_shift_range=0.2,
+        height_shift_range=0.2,
+        shear_range=0.15,
+        zoom_range=0.25,
+        horizontal_flip=True,
+        fill_mode="nearest",
+    )
+    val_gen = ImageDataGenerator(preprocessing_function=preprocess_input)
+
+    train_ds = aug.flow_from_directory(
+        os.path.join(DATASET_LISTO, "train"),
+        target_size=IMG_SIZE,
+        batch_size=BATCH_SIZE,
+        class_mode="categorical",
+        seed=SEED,
+    )
+    val_ds = val_gen.flow_from_directory(
+        os.path.join(DATASET_LISTO, "val"),
+        target_size=IMG_SIZE,
+        batch_size=BATCH_SIZE,
+        class_mode="categorical",
+        seed=SEED,
+    )
+
+    print("\nClases detectadas:", train_ds.class_indices)
+    return train_ds, val_ds
+
+
+# ═══════════════════════════════════════════════════════════
+#  PASO 4 — ENTRENAMIENTO EN DOS FASES
+# ═══════════════════════════════════════════════════════════
 
 def entrenar():
     organizar_dataset()
-    modelo = construir_modelo()
-    aug = ImageDataGenerator(preprocessing_function=preprocess_input,rotation_range=25,width_shift_range=0.2,height_shift_range=0.2,zoom_range=0.25,horizontal_flip=True)
-    vgen = ImageDataGenerator(preprocessing_function=preprocess_input)
-    tr = aug.flow_from_directory(os.path.join(DATASET_LISTO,"train"),target_size=IMG_SIZE,batch_size=BATCH,class_mode="categorical")
-    vl = vgen.flow_from_directory(os.path.join(DATASET_LISTO,"val"),target_size=IMG_SIZE,batch_size=BATCH,class_mode="categorical")
-    cb = [ModelCheckpoint(MODELO_PATH,save_best_only=True,monitor="val_accuracy",verbose=1),EarlyStopping(patience=5,restore_best_weights=True),ReduceLROnPlateau(factor=0.5,patience=3)]
-    print("== FASE 1 =="); modelo.fit(tr,validation_data=vl,epochs=15,callbacks=cb)
-    print("== FASE 2 ==")
-    for layer in modelo.layers:
-        layer.trainable = True
-    for layer in modelo.layers[:-30]:
-        layer.trainable = False
-    modelo.compile(optimizer=tf.keras.optimizers.Adam(1e-5),loss="categorical_crossentropy",metrics=["accuracy"])
-    modelo.fit(tr,validation_data=vl,epochs=10,callbacks=cb)
-    modelo.save(MODELO_PATH); print(f"Modelo guardado: {MODELO_PATH}")
+
+    # Carga el modelo ya entrenado en Fase 1 (no construye uno nuevo)
+    modelo = tf.keras.models.load_model(MODELO_PATH)
+    train_ds, val_ds = crear_generadores()
+
+    callbacks = [
+        ModelCheckpoint(
+            MODELO_PATH,
+            save_best_only=True,
+            monitor="val_accuracy",
+            verbose=1,
+        ),
+        EarlyStopping(patience=5, restore_best_weights=True, verbose=1),
+        ReduceLROnPlateau(factor=0.5, patience=3, min_lr=1e-7, verbose=1),
+    ]
+
+    # ── Fase 2: Fine-tuning últimas 30 capas ──
+    print("\n" + "="*55)
+    print("  FASE 2 — Fine-tuning (últimas 30 capas)")
+    print("="*55)
+    base_model = modelo.get_layer("mobilenetv2_1.00_224")
+    base_model.trainable = True
+    for capa in base_model.layers[:-30]:
+        capa.trainable = False
+
+    modelo.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+        loss="categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+    modelo.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=EPOCAS_F2,
+        callbacks=callbacks,
+    )
+
+    modelo.save(MODELO_PATH)
+    print(f"\n✅  Modelo guardado → {MODELO_PATH}")
+    print("    Ahora ejecuta: python proyectoIA.py\n")
+    
+# ═══════════════════════════════════════════════════════════
+#  PUNTO DE ENTRADA
+# ═══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("="*50); print("  ENTRENAMIENTO CNN"); print("="*50)
+    print("=" * 55)
+    print("  ENTRENAMIENTO CNN — CLASIFICADOR DE RESIDUOS")
+    print("  MobileNetV2 + Transfer Learning")
+    print("=" * 55)
+
+    gpus = tf.config.list_physical_devices("GPU")
+    if gpus:
+        print(f"  GPU detectada: {gpus[0].name}")
+    else:
+        print("  Sin GPU — usando CPU (puede tardar ~20-40 min)")
+
     entrenar()

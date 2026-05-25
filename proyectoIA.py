@@ -37,10 +37,12 @@ import cv2
 # ═══════════════════════════════════════════════════════════
 #  CONFIGURACIÓN GLOBAL
 # ═══════════════════════════════════════════════════════════
+# IMPORTANTE: orden estrictamente alfabético → coincide con flow_from_directory
+# (ImageDataGenerator asigna índices 0-4 en orden alfabético de los nombres de carpeta)
 CATEGORIAS   = ["Cartón", "Metal", "Papel", "Plástico", "Vidrio"]
 IMG_SIZE     = (224, 224)
 MODELO_PATH  = "modelo_residuos.h5"
-CONF_UMBRAL  = 0.30   # confianza mínima para reportar detección
+CONF_UMBRAL  = 0.55   # confianza mínima — 0.30 era muy bajo (azar=20%), 0.55 evita falsos positivos
 CAM_FPS      = 15     # inferencia cada N ms
 COLORES_CAT  = {
     "Papel":    "#F5A623",
@@ -128,7 +130,9 @@ def clasificar(modelo: Model, pil_img: Image.Image) -> dict:
     """
     t0    = time.perf_counter()
     entrada = preprocesar(pil_img)
-    preds   = modelo.predict(entrada, verbose=0)[0]  # array (5,)
+    # modelo() es ~3-5x más rápido que modelo.predict() para inferencia frame a frame
+    # porque evita el overhead de configuración interna de predict()
+    preds   = modelo(entrada, training=False).numpy()[0]  # array (5,)
     tiempo  = int((time.perf_counter() - t0) * 1000)
 
     idx_max    = int(np.argmax(preds))
@@ -202,8 +206,10 @@ def entrenar(data_dir: str = "dataset", epocas: int = 20, batch: int = 32):
 
     # Fase 2: Fine-tuning últimas 30 capas de MobileNetV2
     print("── Fase 2: fine-tuning ──")
-    modelo.layers[0].trainable = True
-    for capa in modelo.layers[0].layers[:-30]:
+    # Acceder por nombre es robusto: no depende del índice de la capa
+    base_model = modelo.get_layer("mobilenetv2_1.00_224")
+    base_model.trainable = True
+    for capa in base_model.layers[:-30]:
         capa.trainable = False
     modelo.compile(
         optimizer=tf.keras.optimizers.Adam(1e-5),
@@ -212,7 +218,13 @@ def entrenar(data_dir: str = "dataset", epocas: int = 20, batch: int = 32):
     )
     modelo.fit(train_ds, validation_data=val_ds, epochs=epocas, callbacks=callbacks)
     modelo.save(MODELO_PATH)
+    # Guardar el mapeo de clases junto al modelo para verificación
+    import json
+    mapa_path = MODELO_PATH.replace(".h5", "_clases.json")
+    with open(mapa_path, "w", encoding="utf-8") as f:
+        json.dump({"categorias": CATEGORIAS, "class_indices": train_ds.class_indices}, f, ensure_ascii=False, indent=2)
     print(f"[OK] Modelo guardado → {MODELO_PATH}")
+    print(f"[OK] Mapa de clases  → {mapa_path}")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -231,9 +243,15 @@ def anotar_imagen(pil_img: Image.Image, resultado: dict) -> Image.Image:
 
     # Etiqueta de fondo
     texto = f"{resultado['label']}  {resultado['confianza']}%"
-    try:
-        fuente = ImageFont.truetype("arial.ttf", 18)
-    except Exception:
+    fuente = None
+    for ruta in ["arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                 "/System/Library/Fonts/Helvetica.ttc"]:
+        try:
+            fuente = ImageFont.truetype(ruta, 18)
+            break
+        except Exception:
+            continue
+    if fuente is None:
         fuente = ImageFont.load_default()
 
     bbox_txt = draw.textbbox((pad, pad), texto, font=fuente)
@@ -441,6 +459,9 @@ class AppClasificador(tk.Tk):
 
     # ─── Cámara en tiempo real ───────────────────────────
     def iniciar_camara(self):
+        if self.modelo is None:
+            self._set_estado("⏳ Modelo aún cargando, espera un momento...", "#F5A623")
+            return
         if self.corriendo:
             return
         self.detener()
@@ -475,6 +496,9 @@ class AppClasificador(tk.Tk):
 
     # ─── Cargar imagen desde disco ───────────────────────
     def cargar_imagen(self):
+        if self.modelo is None:
+            self._set_estado("⏳ Modelo aún cargando, espera un momento...", "#F5A623")
+            return
         self.detener()
         path = filedialog.askopenfilename(
             title="Seleccionar imagen",

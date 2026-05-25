@@ -9,7 +9,8 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 
 DATASET_LISTO = "dataset_listo"
-CATS = ["Carton", "Metal", "Papel", "Plastico", "Vidrio"]
+# CRÍTICO: orden alfabético estricto → coincide con los índices que asigna flow_from_directory
+CATS = ["Cartón", "Metal", "Papel", "Plástico", "Vidrio"]
 IMG_SIZE = (224, 224)
 BATCH = 32
 MODELO_PATH = "modelo_residuos.h5"
@@ -65,12 +66,20 @@ print("\n== FASE 1: Cabeza mejorada ==")
 modelo.fit(tr, validation_data=vl, epochs=20, callbacks=cb)
 
 print("\n== FASE 2: Fine-tuning profundo ==")
-for layer in modelo.layers:
-    layer.trainable = True
-for layer in modelo.layers[:-50]:
+# Acceder a MobileNetV2 por nombre — más robusto que iterar modelo.layers por índice
+base_model = modelo.get_layer("mobilenetv2_1.00_224")
+base_model.trainable = True
+for layer in base_model.layers[:-50]:
     layer.trainable = False
 modelo.compile(optimizer=tf.keras.optimizers.Adam(5e-6),
                loss="categorical_crossentropy", metrics=["accuracy"])
 modelo.fit(tr, validation_data=vl, epochs=15, callbacks=cb)
 modelo.save(MODELO_PATH)
+# Guardar mapa de clases para verificar consistencia con proyectoIA.py
+import json
+mapa_path = MODELO_PATH.replace(".h5", "_clases.json")
+with open(mapa_path, "w", encoding="utf-8") as f:
+    json.dump({"categorias": CATS, "class_indices": tr.class_indices}, f, ensure_ascii=False, indent=2)
 print(f"\nModelo mejorado guardado: {MODELO_PATH}")
+print(f"Mapa de clases:          {mapa_path}")
+print(f"Orden real usado:        {tr.class_indices}")

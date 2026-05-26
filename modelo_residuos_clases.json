@@ -1,0 +1,16 @@
+{
+  "categorias": [
+    "Cartón",
+    "Metal",
+    "Papel",
+    "Plástico",
+    "Vidrio"
+  ],
+  "class_indices": {
+    "Cartón": 0,
+    "Metal": 1,
+    "Papel": 2,
+    "Plástico": 3,
+    "Vidrio": 4
+  }
+}

@@ -31,6 +31,9 @@ from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
 from tensorflow.keras.models import Model
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+from sklearn.metrics import classification_report
+
+##from mejorar_modelo import CATS
 
 
 # ═══════════════════════════════════════════════════════════
@@ -38,7 +41,7 @@ from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLRO
 # ═══════════════════════════════════════════════════════════
 
 # Ruta donde está el dataset descomprimido
-DATASET_RAW = "dataset/Garbage classification/Garbage classification/garbage_classification"
+DATASET_RAW = "dataset/dataset/Garbage classification/Garbage classification/garbage_classification"
 
 # Carpeta que se creará con la estructura train/val
 DATASET_LISTO = "dataset_listo"
@@ -272,6 +275,12 @@ def entrenar():
     print(f"     Orden usado         : {tr.class_indices}")
     print("\n     Ahora ejecuta: python proyectoIA.py\n")
 
+    vl.reset()
+    y_true = vl.classes
+    y_pred = np.argmax(modelo.predict(vl), axis=1)
+
+    print(classification_report(y_true, y_pred, target_names=CATEGORIAS))
+
 
 # ═══════════════════════════════════════════════════════════
 #  PUNTO DE ENTRADA
@@ -290,3 +299,4 @@ if __name__ == "__main__":
         print("  Sin GPU — usando CPU (puede tardar ~30-60 min)")
 
     entrenar()
+
